@@ -4,6 +4,8 @@ from fuzzywuzzy import process
 import numpy as np
 import sys
 from collections import defaultdict
+import re # Import regex module
+
 
 # --- Helper Formatting Functions ---
 
@@ -36,10 +38,165 @@ def create_docket_sequence_map(unique_dockets_in_group):
         formatted_dockets.append(f"{seq_num}. {docket}")
     return "\n".join(formatted_dockets), docket_to_seq_num_map
 
+def clean_decoded_body(text):
+    """
+    Cleans the email body by first redacting PII, then removing signatures/disclaimers/replies,
+    and finally normalizing whitespace.
+    """
+    if not isinstance(text, str):
+        return ""
+    
+    original_text = text.strip()
+    cleaned_text = original_text
+
+    # --- Phase 1: PII Redaction (Redact before removing larger blocks) ---
+    # This is done top-down to catch PII wherever it appears.
+
+    # 1. Email Addresses
+    # Matches common email patterns, including those with subdomains
+    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    cleaned_text = re.sub(email_pattern, '[REDACTED_EMAIL]', cleaned_text, flags=re.IGNORECASE)
+
+    # 2. Phone Numbers (various formats)
+    # Matches international, national, and common local formats
+    phone_pattern = r'\+?\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{4,9}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b|\b\d{4}[-.\s]?\d{6}\b'
+    cleaned_text = re.sub(phone_pattern, '[REDACTED_PHONE]', cleaned_text)
+
+    # 3. Specific Address Components (more conservative to avoid over-redaction)
+    # Looking for patterns like "Plot No.", "Udyog Vihar", "Okhla Phase", "New Delhi", "Gurugram", "Haryana", "India" with numbers/phases
+    address_component_patterns = [
+        r'\bPlot No\.\s*\d+',
+        r'\b(?:Udyog Vihar|Okhla Phase)\s*(?:Phase)?\s*[\d\w-]*',
+        r'\b(?:New Delhi|Gurugram|Haryana|Jaipur|Sitapura|India)\b(?:,\s*\d{6})?', # City/State/Country with optional pincode
+        r'\b(?:A-?\d+|UGF|[\d]{1,4})\s*(?:,\s*\d{1,4}\s*Okhla Phase)?\s*(?:,\s*IT-?\d{3})?', # Building/flat numbers with optional phase/IT zone
+    ]
+    for pattern in address_component_patterns:
+        cleaned_text = re.sub(pattern, '[REDACTED_ADDRESS_PART]', cleaned_text, flags=re.IGNORECASE)
+
+    # 4. Names (highly sensitive, only redact if clearly part of a signature-like contact line)
+    # This is tricky. We'll only redact names if they are immediately followed by a title/department/contact info.
+    # This is a very conservative approach to avoid redacting names in the main body.
+    # Example: "Regards, John Doe | Senior Analyst" or "Name: John Doe"
+    name_in_signature_pattern = r'(?:Regards|Thanks|Name|Contact):\s*([A-Za-z\s\.]+)(?:\s*\|[\s\S]*?(?:Phone|Email|Mobile|Contact|@|www\.|http|:|✆|✉))?'
+    
+    # Use a replacer function to keep the "Regards," part but redact the name.
+    def redact_name_replacer(match):
+        full_match = match.group(0)
+        name_part = match.group(1)
+        return full_match.replace(name_part, '[REDACTED_NAME]')
+
+    # Apply this pattern only if it's likely a signature context
+    # This is a very targeted redaction.
+    cleaned_text = re.sub(name_in_signature_pattern, redact_name_replacer, cleaned_text, flags=re.IGNORECASE)
+
+
+    # --- Phase 2: Signature/Disclaimer/Reply Trimming (Bottom-Up) ---
+    # This phase aims to cut off entire blocks of unwanted text from the end.
+    
+    lines = cleaned_text.split('\n')
+    effective_content_lines = []
+    found_cut_off_marker = False
+
+    # Define patterns that typically mark the end of primary email content.
+    # These patterns are ordered from more specific/reliable "cut-off" points to more general ones.
+    # They will be searched for from the bottom of the email.
+    end_of_content_markers = [
+        # --- Highly reliable markers for reply chains and standard disclaimers ---
+        r"^\s*On\s+.+?\s+wrote:[\s]*$", # Standard "On [Date] [Sender] wrote:"
+        r"^\s*From:\s*.+?\s*Sent:\s*.+?\s*To:\s*.+?\s*Subject:\s*.+?\s*$", # Generic email client header (e.g., from Outlook)
+        r"^\s*-----Original Message-----\s*$", # Standard original message separator
+        r"^\s*[\-_=]{5,}\s*Original Message[\-_=]{5,}[\s\S]*?$", # More robust original message block
+        r"----- Disclaimer -----.+$", # Standard disclaimer line
+        r"Confidentiality Notice:[\s\S]*$", # Common confidentiality notice
+        r"NOTICE:\s*[\s\S]*?This e-mail and any files transmitted with it are confidential[\s\S]*?$", # Detailed notice
+        r"This email and all contents are subject to the following disclaimer:.+$",
+        r"Legal Disclaimer:.+$",
+        r"This e-mail message \(including its attachments\) is private.+?$",
+        
+        # --- Comprehensive Signature/Closing Patterns (targeting combinations of elements) ---
+        # This broad pattern aims to catch various closing phrases followed by contact/company details
+        r"(?:Thanks|Thank you|Regards|Best regards|Sincerely|Cheers),?\s*[\s\S]*?" # Start with a common closing
+        r"(?:Finance Executive|Team Lead|Senior Data Analyst|Associate Manager|Senior Technical Consultant|Director|Collection Dept|Network Administrator|Engineer|Operations|Manager|TOC engineer|Team Leader|Customer Experience|Regional Head|Head of IT|Central TOC|IT Zone|Registered Office|C-Zentrix|Industowers|Thomas Cook|iae GLOBAL India|Dr ITM Limited|Mindwars|Bansal classes|Towards Vision Technologies \(P\) Ltd\.)" # Common titles/roles/company names
+        r"[\s\S]*?" # Any content including newlines
+        r"(?:Mobile:|\+?\d{1,3}[ -]?\(?\d{2,5}\)?[ -]?\d{3,4}[ -]?\d{4,}|Email:|a-.*?@|www\.|http|social media|thomascook\.in|c-zentrix\.com|iaeglobalindia\.net|drit\.in|industowers\.com|mindwars\.co\.in|gmail\.com|Contact:|✆|✉|Plot No\.|Udyog Vihar|Okhla Phase|Sitapura|Jaipur|New Delhi|Gurugram|Haryana|India)" # Contact info, domain, address parts
+        r"[\s\S]*?$", # End of pattern, non-greedy to match shortest possible block
+
+        # Specific "Snip:-" pattern from user's example
+        r"Snip:-\s*(?:Thanks|Regards)[\s\S]*?(?:Central TOC|Operation Contact:|\+?\d{1,3}[ -]?\(?\d{2,5}\)?[ -]?\d{3,4}[ -]?\d{4,}|Email:|a-.*?@)[\s\S]*?$",
+        
+        # Specific line starting with "." pattern from user's example
+        r"^\s*\. (?:Thanks|Regards)[\s\S]*?(?:Mobile:|Email:|\+?\d{1,3}[ -]?\(?\d{2,5}\)?[ -]?\d{3,4}[ -]?\d{4,}|a-.*?@)[\s\S]*?$",
+        
+        # --- Generic signature markers (less specific, but can catch more) ---
+        r"^\s*(?:Phone|Mobile|WhatsApp|Email|Contact|@|www\.|http|:|✆|✉)\s*:.+?$", # Line starts with keyword and colon
+        r"^\s*(?:http|www\.)[\s\S]*?$", # Line contains a URL
+        r"^\s*[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\s*|\s*\|.*)?$", # Line contains only an email address, possibly with pipe and text
+        r"^\s*(?:Thanks|Thank you|Regards|Best regards|Sincerely|Cheers),?\s*[A-Za-z\s\.'\d]+[\s\S]*?$", # Simple closing line with name/title
+        
+        # --- System Reports and other automated footers ---
+        r"Hyper-V Environment Report:[\s\S]*?$",
+        r"VCenter Environment Report:[\s\S]*?$",
+        r"Cluster Overview \(VcenterCluster\)[\s\S]*?$",
+        
+        # --- Final fallback for lines with many separators, indicating a break ---
+        r"^\s*[\-_=]{5,}\s*$", # Lines with many dashes/underscores/equals (generic separator)
+    ]
+    
+    # Iterate backwards through the lines to find the first match from the bottom.
+    # This ensures we cut off the *last* signature/disclaimer, preserving content above it.
+    cut_off_index = len(lines)
+    for i in range(len(lines) - 1, -1, -1):
+        # Create a substring from the current line 'i' to the very end of the text.
+        # This is crucial for multi-line regex patterns that might span several lines.
+        sub_text_from_current_line = "\n".join(lines[i:])
+        
+        # Iterate through the patterns in the defined order (more specific/reliable first).
+        for pattern in end_of_content_markers:
+            # Use re.search because the pattern might not start at the very beginning of `sub_text_from_current_line`
+            # but rather somewhere within it (e.g. if the signature starts mid-line due to wrapping).
+            if re.search(pattern, sub_text_from_current_line, flags=re.IGNORECASE | re.DOTALL | re.MULTILINE):
+                cut_off_index = i
+                found_cut_off_marker = True
+                break # Found a match, this is our cut-off point, break from inner pattern loop
+        if found_cut_off_marker: # If a match was found in the inner loop
+            break # Stop outer loop, we have found the highest (closest to content) cut-off point
+
+    cleaned_text = "\n".join(lines[:cut_off_index])
+    
+    # --- Phase 3: Final Normalization ---
+    # Normalize multiple newlines to at most two (representing a paragraph break)
+    cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
+    
+    # Strip leading/trailing whitespace from each line, then from the whole text
+    # This also removes empty lines that might result from stripping, unless they are intentional paragraph breaks
+    text_lines_processed = []
+    for line in cleaned_text.split('\n'):
+        stripped_line = line.strip()
+        if stripped_line: # Keep non-empty lines
+            text_lines_processed.append(stripped_line)
+        elif line: # Keep lines that were only whitespace if they represent an original line break
+            text_lines_processed.append('') # Preserve one empty line for paragraph separation
+    
+    cleaned_text = "\n".join(text_lines_processed)
+    cleaned_text = cleaned_text.strip() # Final strip for the whole text
+
+    return cleaned_text
+
+def clean_subject_for_comparison(subject_text):
+    """
+    Removes common email prefixes (Fwd:, Re:) from subject for comparison.
+    """
+    if not isinstance(subject_text, str):
+        return ""
+    # Remove common prefixes like Fwd:, Re: (case-insensitive) and any trailing spaces
+    subject_text = re.sub(r"^(Fwd|Fw|Re|Ref|FWD|FW|RE|REF):\s*", "", subject_text, flags=re.IGNORECASE).strip()
+    return subject_text
+
+
 def format_docket_specific_content(group_df, col_name, docket_to_seq_num_map):
     """
     Merges content (DecodedBody, Subject, Problem Reported) based on individual docket numbers,
-    prefixing with the docket's sequence number.
+    prefixing with the docket's sequence number. Applies specific cleaning based on col_name.
     Format: "1. [Content for Docket A]\n2. [Content for Docket B]"
     """
     docket_content_map = defaultdict(list)
@@ -50,7 +207,14 @@ def format_docket_specific_content(group_df, col_name, docket_to_seq_num_map):
         row_dockets_str = str(row['docket_no'])
         row_dockets = [d.strip() for d in row_dockets_str.split(';') if d.strip()]
         
-        content = str(row[col_name]).strip()
+        # Apply specific cleaning based on column name
+        content = str(row[col_name])
+        if col_name == 'DecodedBody':
+            content = clean_decoded_body(content)
+        elif col_name == 'subject': # Clean subjects for display as well
+            content = clean_subject_for_comparison(content)
+        else: # For other columns (like problem_reported), just strip whitespace
+            content = content.strip()
         
         # Associate content with each individual docket in this row
         for docket in row_dockets:
@@ -64,9 +228,10 @@ def format_docket_specific_content(group_df, col_name, docket_to_seq_num_map):
     for docket in sorted_dockets_in_group:
         seq_num = docket_to_seq_num_map[docket]
         # Get unique content for this specific docket and join them with spaces
-        unique_content_for_docket = " ".join(sorted(list(set(docket_content_map[docket]))))
+        # Filter out empty strings before joining
+        unique_content_for_docket = " ".join(sorted(list(set(filter(None, docket_content_map[docket])))))
         
-        if unique_content_for_docket:
+        if unique_content_for_docket: # Only add if content is not empty after cleaning
             formatted_output.append(f"{seq_num}. {unique_content_for_docket}")
     
     return "\n".join(formatted_output)
@@ -141,21 +306,22 @@ def consolidate_tickets(file_path, similarity_threshold=80):
     processed_indices = set()
 
     # Get a list of subjects and their original indices for primary grouping
-    subjects_with_indices = [(str(sub), i) for i, sub in enumerate(df['subject'])]
+    # Clean subjects for comparison here
+    subjects_with_indices = [(clean_subject_for_comparison(str(sub)), i) for i, sub in enumerate(df['subject'])]
 
-    for i, (current_subject, current_idx) in enumerate(subjects_with_indices):
+    for i, (current_subject_cleaned, current_idx) in enumerate(subjects_with_indices):
         if current_idx in processed_indices:
             continue # Skip if this row has already been processed as part of a group
 
-        # Step 1: Identify group based on similar subject
+        # Step 1: Identify group based on similar subject (using cleaned subject)
         current_group_indices = {current_idx}
         
-        for j, (other_subject, other_idx) in enumerate(subjects_with_indices):
+        for j, (other_subject_cleaned, other_idx) in enumerate(subjects_with_indices):
             if other_idx in processed_indices or other_idx == current_idx:
                 continue
 
             # Calculate similarity using token_sort_ratio for better robustness to word order
-            score = fuzz.token_sort_ratio(current_subject, other_subject)
+            score = fuzz.token_sort_ratio(current_subject_cleaned, other_subject_cleaned)
 
             if score >= similarity_threshold:
                 current_group_indices.add(other_idx)
@@ -182,6 +348,7 @@ def consolidate_tickets(file_path, similarity_threshold=80):
             consolidated_row_data['docket_no'] = formatted_dockets_str
 
             # --- Consolidate other columns based on docket numbers ---
+            # These functions now apply cleaning internally based on column type
             consolidated_row_data['DecodedBody'] = format_docket_specific_content(group_df, 'DecodedBody', docket_to_seq_num_map)
             consolidated_row_data['subject'] = format_docket_specific_content(group_df, 'subject', docket_to_seq_num_map)
             consolidated_row_data['problem_reported'] = format_docket_specific_content(group_df, 'problem_reported', docket_to_seq_num_map)
@@ -217,7 +384,7 @@ def consolidate_tickets(file_path, similarity_threshold=80):
 # --- Main execution ---
 # Define the path to the uploaded CSV file
 file_path = 'ticket_details_2024_01.csv'
-output_file_path = 'Demo2consolidated_tickets_formatted.csv' 
+output_file_path = '2consolidated_tickets_formatted.csv' 
 
 # Set your desired similarity threshold (e.g., 75, 80, 85, etc.)
 # A higher threshold means stricter similarity.
