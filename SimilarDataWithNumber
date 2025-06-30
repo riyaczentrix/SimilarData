@@ -5,6 +5,8 @@ import numpy as np
 import sys
 from collections import defaultdict
 
+# --- Helper Formatting Functions ---
+
 def format_simple_numbered_list(values):
     """
     Formats a list of values into a numbered string (e.g., "1. ValueA\n2. ValueB").
@@ -19,56 +21,93 @@ def format_simple_numbered_list(values):
         formatted_items.append(f"{i + 1}. {str(val).strip()}") # .strip() to clean whitespace
     return "\n".join(formatted_items)
 
-def format_subject_output(unique_subjects):
+def create_docket_sequence_map(unique_dockets_in_group):
     """
-    Formats unique subjects into a 1.1, 1.2, ... string and creates a mapping.
-    Returns the formatted string and a dictionary mapping original subject to its 1.X number.
+    Creates a mapping from actual docket numbers to their sequence numbers (1, 2, 3...)
+    within a consolidated group, and returns the formatted docket string.
     """
-    subject_to_num_map = {}
-    formatted_subjects = []
-    # Sort subjects for consistent numbering
-    sorted_subjects = sorted(unique_subjects)
+    docket_to_seq_num_map = {}
+    formatted_dockets = []
+    sorted_dockets = sorted(list(unique_dockets_in_group)) # Ensure consistent order
 
-    for i, subject_str in enumerate(sorted_subjects):
-        num_str = f"1.{i + 1}"
-        formatted_subjects.append(f"{num_str} {subject_str.strip()}")
-        subject_to_num_map[subject_str] = num_str
-    return "\n".join(formatted_subjects), subject_to_num_map
+    for i, docket in enumerate(sorted_dockets):
+        seq_num = i + 1
+        docket_to_seq_num_map[docket] = str(seq_num)
+        formatted_dockets.append(f"{seq_num}. {docket}")
+    return "\n".join(formatted_dockets), docket_to_seq_num_map
 
-def format_sub_disposition_output(group_df, subject_to_num_map):
+def format_docket_specific_content(group_df, col_name, docket_to_seq_num_map):
     """
-    Formats sub_disposition_name with associated subject numbers (e.g., "(1.3, 1.4) Admin Requirement").
+    Merges content (DecodedBody, Subject, Problem Reported) based on individual docket numbers,
+    prefixing with the docket's sequence number.
+    Format: "1. [Content for Docket A]\n2. [Content for Docket B]"
     """
-    sub_disp_to_subject_nums = defaultdict(set) # Use set to avoid duplicate subject numbers
+    docket_content_map = defaultdict(list)
+    
+    # Iterate through each row in the group DataFrame (rows from the similar-subject group)
+    for index, row in group_df.iterrows():
+        # Get individual dockets from this row's 'docket_no' cell
+        row_dockets_str = str(row['docket_no'])
+        row_dockets = [d.strip() for d in row_dockets_str.split(';') if d.strip()]
+        
+        content = str(row[col_name]).strip()
+        
+        # Associate content with each individual docket in this row
+        for docket in row_dockets:
+            if docket in docket_to_seq_num_map: # Only if this docket is part of the current consolidated group's dockets
+                docket_content_map[docket].append(content)
+    
+    formatted_output = []
+    # Sort by docket sequence number for consistent output
+    sorted_dockets_in_group = sorted(docket_to_seq_num_map.keys(), key=lambda d: int(docket_to_seq_num_map[d]))
+
+    for docket in sorted_dockets_in_group:
+        seq_num = docket_to_seq_num_map[docket]
+        # Get unique content for this specific docket and join them with spaces
+        unique_content_for_docket = " ".join(sorted(list(set(docket_content_map[docket]))))
+        
+        if unique_content_for_docket:
+            formatted_output.append(f"{seq_num}. {unique_content_for_docket}")
+    
+    return "\n".join(formatted_output)
+
+def format_docket_attribute_grouping(group_df, attribute_col_name, docket_to_seq_num_map):
+    """
+    Formats Priority, Disposition, Sub-disposition with associated docket sequence numbers.
+    Format: "(1,2,3) Semicritical\n(4,5,6) Non Critical"
+    """
+    attribute_to_docket_seq_nums = defaultdict(set) # Maps attribute value to a set of docket sequence numbers
 
     for index, row in group_df.iterrows():
-        sub_disp = str(row['sub_disposition_name']).strip()
-        original_subject = str(row['subject']).strip()
+        # Get individual dockets from this row's 'docket_no' cell
+        row_dockets_str = str(row['docket_no'])
+        row_dockets = [d.strip() for d in row_dockets_str.split(';') if d.strip()]
+        
+        attribute_value = str(row[attribute_col_name]).strip()
 
-        # Only process if sub_disp is not 'nan' or empty after stripping
-        if sub_disp and sub_disp.lower() != 'nan':
-            # Get the 1.X number for the subject of this row
-            subject_num = subject_to_num_map.get(original_subject)
-            if subject_num:
-                sub_disp_to_subject_nums[sub_disp].add(subject_num)
+        # If attribute value is not 'nan' or empty, associate dockets with it
+        if attribute_value and attribute_value.lower() != 'nan':
+            for docket in row_dockets:
+                if docket in docket_to_seq_num_map: # Ensure docket is part of the current consolidated group's dockets
+                    attribute_to_docket_seq_nums[attribute_value].add(docket_to_seq_num_map[docket])
 
-    formatted_sub_dispositions = []
-    # Sort sub-disposition names for consistent output order
-    sorted_sub_disps = sorted(sub_disp_to_subject_nums.keys())
+    formatted_attributes = []
+    # Sort attribute values for consistent output order
+    sorted_attribute_values = sorted(attribute_to_docket_seq_nums.keys())
 
-    for sub_disp in sorted_sub_disps:
-        # Sort the subject numbers numerically (e.g., 1.1, 1.2, 1.10)
-        # Convert to float for numeric sort, then back to string for display
-        subject_nums_sorted = sorted(list(sub_disp_to_subject_nums[sub_disp]), key=lambda x: float(x.replace('1.', '')))
-        subject_nums_str = ", ".join(subject_nums_sorted)
-        formatted_sub_dispositions.append(f"({subject_nums_str}){sub_disp}")
+    for attr_val in sorted_attribute_values:
+        # Sort docket sequence numbers numerically
+        docket_seq_nums_sorted = sorted(list(attribute_to_docket_seq_nums[attr_val]), key=int)
+        docket_nums_str = ", ".join(docket_seq_nums_sorted)
+        formatted_attributes.append(f"({docket_nums_str}){attr_val}")
 
-    return "\n".join(formatted_sub_dispositions)
+    return "\n".join(formatted_attributes)
 
 
 def consolidate_tickets(file_path, similarity_threshold=80):
     """
-    Scans a CSV file, identifies rows with similar subjects, and consolidates them.
+    Scans a CSV file, identifies rows with similar subjects (primary grouping),
+    and then consolidates other columns based on docket numbers within those groups.
 
     Args:
         file_path (str): The path to the input CSV file.
@@ -87,28 +126,30 @@ def consolidate_tickets(file_path, similarity_threshold=80):
         print(f"Error reading CSV file: {e}", file=sys.stderr)
         return pd.DataFrame()
 
-    # Ensure 'subject' column exists
-    if 'subject' not in df.columns:
-        print("Error: 'subject' column not found in the CSV file.", file=sys.stderr)
-        return pd.DataFrame()
+    # Ensure required columns exist, add if missing for robustness
+    required_cols = ['docket_no', 'subject', 'problem_reported', 'priority_name', 
+                     'disposition_name', 'sub_disposition_name', 'DecodedBody']
+    for col in required_cols:
+        if col not in df.columns:
+            print(f"Warning: Column '{col}' not found. Adding empty column.", file=sys.stderr)
+            df[col] = '' 
+    
+    # Fill any NaN values in the input DataFrame with empty strings before processing
+    df = df.fillna('')
 
-    # Initialize a list to store consolidated rows
-    consolidated_rows = []
-    # Keep track of indices already processed
+    consolidated_rows_output = []
     processed_indices = set()
 
-    # Get a list of subjects and their original indices
+    # Get a list of subjects and their original indices for primary grouping
     subjects_with_indices = [(str(sub), i) for i, sub in enumerate(df['subject'])]
 
     for i, (current_subject, current_idx) in enumerate(subjects_with_indices):
         if current_idx in processed_indices:
             continue # Skip if this row has already been processed as part of a group
 
-        # Initialize a group for similar subjects
+        # Step 1: Identify group based on similar subject
         current_group_indices = {current_idx}
-        current_group_subjects = [current_subject] # Keep track of original subjects in group
-
-        # Compare the current subject with all other unprocessed subjects
+        
         for j, (other_subject, other_idx) in enumerate(subjects_with_indices):
             if other_idx in processed_indices or other_idx == current_idx:
                 continue
@@ -118,68 +159,57 @@ def consolidate_tickets(file_path, similarity_threshold=80):
 
             if score >= similarity_threshold:
                 current_group_indices.add(other_idx)
-                current_group_subjects.append(other_subject)
-
-        # Mark all found similar subjects as processed
+        
+        # Mark all rows in this subject-similar group as processed
         for idx in current_group_indices:
             processed_indices.add(idx)
 
-        # Consolidate data for the current group
+        # Process the current subject-based group
         if current_group_indices:
-            # Select all rows belonging to this group
-            group_df = df.loc[list(current_group_indices)]
+            group_df = df.loc[list(current_group_indices)].copy()
 
-            consolidated_row = {}
+            consolidated_row_data = {}
+            
+            # --- Generate Docket Numbering and Map for this specific group ---
+            all_dockets_in_group = []
+            for docket_cell in group_df['docket_no'].astype(str):
+                # Split and extend to get individual dockets
+                all_dockets_in_group.extend([d.strip() for d in docket_cell.split(';') if d.strip()])
+            unique_dockets_in_group = set(all_dockets_in_group) # Get unique individual dockets
+            
+            # Create the 1., 2. numbering for dockets and the mapping
+            formatted_dockets_str, docket_to_seq_num_map = create_docket_sequence_map(unique_dockets_in_group)
+            consolidated_row_data['docket_no'] = formatted_dockets_str
 
-            # --- Handle 'subject' column with 1.1, 1.2 numbering ---
-            # Get unique subjects from the current group for numbering
-            unique_group_subjects = group_df['subject'].astype(str).unique()
-            consolidated_subject_str, subject_to_num_map = format_subject_output(unique_group_subjects)
-            consolidated_row['subject'] = consolidated_subject_str
+            # --- Consolidate other columns based on docket numbers ---
+            consolidated_row_data['DecodedBody'] = format_docket_specific_content(group_df, 'DecodedBody', docket_to_seq_num_map)
+            consolidated_row_data['subject'] = format_docket_specific_content(group_df, 'subject', docket_to_seq_num_map)
+            consolidated_row_data['problem_reported'] = format_docket_specific_content(group_df, 'problem_reported', docket_to_seq_num_map)
 
-            # --- Handle 'sub_disposition_name' with (1.X, 1.Y) format ---
-            if 'sub_disposition_name' in df.columns:
-                consolidated_row['sub_disposition_name'] = format_sub_disposition_output(group_df, subject_to_num_map)
-            else:
-                consolidated_row['sub_disposition_name'] = "" # Or handle as generic list if column exists but no specific format required.
+            # --- Consolidate attributes with (seq,seq)Value format ---
+            consolidated_row_data['priority_name'] = format_docket_attribute_grouping(group_df, 'priority_name', docket_to_seq_num_map)
+            consolidated_row_data['disposition_name'] = format_docket_attribute_grouping(group_df, 'disposition_name', docket_to_seq_num_map)
+            consolidated_row_data['sub_disposition_name'] = format_docket_attribute_grouping(group_df, 'sub_disposition_name', docket_to_seq_num_map)
 
-            # --- Handle 'docket_no' and 'DecodedBody' with simple 1. 2. numbering ---
-            if 'docket_no' in df.columns:
-                # Extract all individual docket numbers (handle semicolon separation)
-                all_dockets = []
-                for docket_cell in group_df['docket_no'].astype(str):
-                    if docket_cell.lower() != 'nan':
-                        all_dockets.extend([d.strip() for d in docket_cell.split(';') if d.strip()])
-                unique_dockets = sorted(list(set(all_dockets)))
-                consolidated_row['docket_no'] = format_simple_numbered_list(unique_dockets)
-            else:
-                consolidated_row['docket_no'] = ""
+            # --- Handle remaining columns with simple 1. 2. numbering ---
+            # Define all columns from the original DataFrame
+            all_original_columns = df.columns.tolist()
+            for col in all_original_columns:
+                # Skip columns already processed above
+                if col not in consolidated_row_data:
+                    unique_values = group_df[col].astype(str).unique()
+                    consolidated_row_data[col] = format_simple_numbered_list(unique_values)
+            
+            # Add the fully formed consolidated row to the output list
+            # Ensure all original columns are present in the final row, filling with empty if not consolidated
+            final_row_dict = {col: consolidated_row_data.get(col, '') for col in all_original_columns}
+            consolidated_rows_output.append(final_row_dict)
 
-            if 'DecodedBody' in df.columns:
-                unique_decoded_bodies = group_df['DecodedBody'].astype(str).unique()
-                consolidated_row['DecodedBody'] = format_simple_numbered_list(unique_decoded_bodies)
-            else:
-                consolidated_row['DecodedBody'] = ""
-
-
-            # --- Handle all other columns with simple 1. 2. numbering ---
-            for col in df.columns:
-                if col in ['subject', 'sub_disposition_name', 'docket_no', 'DecodedBody']:
-                    continue # Already handled
-
-                # Get unique values for the column within the group
-                unique_values = group_df[col].astype(str).unique()
-                # Use the simple numbered list format
-                consolidated_row[col] = format_simple_numbered_list(unique_values)
-
-            consolidated_rows.append(consolidated_row)
-
-    # Create a new DataFrame from consolidated rows, ensuring all original columns are present
-    # This creates an empty dataframe with all columns from the original df
-    all_original_columns = df.columns.tolist()
-    consolidated_df = pd.DataFrame(consolidated_rows, columns=all_original_columns)
+    # Create a new DataFrame from the consolidated rows
+    all_original_columns = df.columns.tolist() # Re-get columns in case any were added
+    consolidated_df = pd.DataFrame(consolidated_rows_output, columns=all_original_columns)
     
-    # Fill any NaN values in the consolidated DataFrame with empty strings for cleaner output
+    # Final fillna for any cells that might still be NaN (should be rare with current logic)
     consolidated_df = consolidated_df.fillna('')
 
     return consolidated_df
@@ -187,13 +217,13 @@ def consolidate_tickets(file_path, similarity_threshold=80):
 # --- Main execution ---
 # Define the path to the uploaded CSV file
 file_path = 'ticket_details_2024_01.csv'
-output_file_path = 'consolidated_tickets_formatted.csv' # Changed output file name for clarity
+output_file_path = 'Demo2consolidated_tickets_formatted.csv' 
 
 # Set your desired similarity threshold (e.g., 75, 80, 85, etc.)
 # A higher threshold means stricter similarity.
 SIMILARITY_THRESHOLD = 80
 
-print(f"Consolidating tickets from '{file_path}' with a similarity threshold of {SIMILARITY_THRESHOLD}...")
+print(f"Consolidating tickets from '{file_path}' based on similar subjects (threshold={SIMILARITY_THRESHOLD})...")
 consolidated_df = consolidate_tickets(file_path, SIMILARITY_THRESHOLD)
 
 if not consolidated_df.empty:
@@ -202,17 +232,28 @@ if not consolidated_df.empty:
         print(f"Consolidation complete! Consolidated data saved to '{output_file_path}'")
         print(f"\nTotal original rows: {len(pd.read_csv(file_path))}")
         print(f"Total consolidated rows: {len(consolidated_df)}")
-        print("\n--- First 5 rows of Consolidated Data (Partial View) ---")
-        # Print a selection of columns for preview as DecodedBody can be very long
-        preview_columns = [col for col in consolidated_df.columns if col not in ['DecodedBody']]
-        if 'subject' in consolidated_df.columns:
-            print(consolidated_df[['subject', 'sub_disposition_name', 'docket_no']].head().to_markdown(index=False))
+        print("\n--- First 5 rows of Consolidated Data (Preview of Key Columns) ---")
+        
+        # Define key columns for preview
+        preview_cols = [
+            'docket_no', 
+            'subject', 
+            'problem_reported', 
+            'priority_name', 
+            'disposition_name', 
+            'sub_disposition_name'
+        ]
+        
+        # Filter to only show columns that actually exist in the consolidated DataFrame
+        existing_preview_cols = [col for col in preview_cols if col in consolidated_df.columns]
+        
+        if existing_preview_cols:
+            print(consolidated_df[existing_preview_cols].head().to_markdown(index=False))
         else:
-             print(consolidated_df.head().to_markdown(index=False))
-        print("\n(Note: Full DecodedBody content and other columns are in the CSV file)")
+             print(consolidated_df.head().to_markdown(index=False)) # Fallback if none of the key columns exist
+        print("\n(Note: Full content for all columns, including DecodedBody, is in the CSV file. Enable 'Wrap Text' in spreadsheet for full view.)")
 
     except Exception as e:
         print(f"Error saving consolidated data to CSV: {e}", file=sys.stderr)
 else:
     print("No data to consolidate or an error occurred during processing.")
-
