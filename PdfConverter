@@ -1,0 +1,100 @@
+import pandas as pd
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet
+from io import StringIO
+import html
+
+def csv_to_pdf_per_row(csv_file_path, pdf_output_path):
+    """
+    Reads a CSV file and generates a PDF where each row, along with its
+    column names, is written on a separate page.
+
+    Args:
+        csv_file_path (str): The path to the input CSV file.
+        pdf_output_path (str): The path where the output PDF will be saved.
+    """
+    try:
+        # Try reading the CSV file with 'macroman' encoding first
+        df = pd.read_csv(csv_file_path, encoding='macroman')
+    except UnicodeDecodeError:
+        # If 'macroman' fails, try reading with 'latin1' encoding
+        print(f"MacRoman decoding failed for '{csv_file_path}'. Trying 'latin1' encoding...")
+        try:
+            df = pd.read_csv(csv_file_path, encoding='latin1')
+        except Exception as e:
+            print(f"Error: Could not read CSV file with 'latin1' encoding either: {e}")
+            return
+    except FileNotFoundError:
+        print(f"Error: CSV file not found at '{csv_file_path}'")
+        return
+    except pd.errors.EmptyDataError:
+        print(f"Error: CSV file at '{csv_file_path}' is empty.")
+        return
+    except Exception as e:
+        print(f"An unexpected error occurred while reading the CSV file: {e}")
+        return
+
+    doc = SimpleDocTemplate(pdf_output_path, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
+
+    # Get column names
+    column_names = df.columns.tolist()
+
+    # Iterate through each row of the DataFrame
+    for index, row in df.iterrows():
+        # Add a title for the row
+        story.append(Paragraph(f"<b>Row {index + 1} Data:</b>", styles['h2']))
+        # Reduced space after the row title
+        story.append(Spacer(1, 0.1 * letter[1]))
+
+        # Add each column name and its value
+        for col_name in column_names:
+            value = row[col_name]
+            # Convert value to string and escape potential HTML/XML characters
+            escaped_value = html.escape(str(value))
+            story.append(Paragraph(f"<b>{col_name}:</b> {escaped_value}", styles['Normal']))
+            # Reduced space between key-value pairs
+            story.append(Spacer(1, 0.05 * letter[1]))
+
+        # Add a page break after each row, unless it's the last row
+        if index < len(df) - 1:
+            story.append(PageBreak())
+
+    try:
+        # Build the PDF document
+        doc.build(story)
+        print(f"PDF successfully created at '{pdf_output_path}' with {len(df)} pages.")
+    except Exception as e:
+        print(f"An error occurred while generating the PDF: {e}")
+
+# --- Example Usage ---
+if __name__ == "__main__":
+    # Create a dummy CSV file content for demonstration purposes
+    # In a real scenario, you would have an actual CSV file on your system.
+    dummy_csv_content = """Name,Age,City,Occupation
+Alice,30,New York,Engineer
+Bob,24,London,Designer
+Charlie,35,Paris,Doctor
+Diana,29,Berlin,Artist
+Eve,42,Tokyo,Manager
+"""
+    # Save the dummy content to a temporary CSV file
+    # This part is commented out as you will be using an existing file.
+    # dummy_csv_file_path = "sample_data.csv"
+    # with open(dummy_csv_file_path, "w") as f:
+    #     f.write(dummy_csv_content)
+    # print(f"Dummy CSV file '{dummy_csv_file_path}' created.")
+
+    # Define the input CSV file path (updated to your specified filename)
+    csv_file_path = "FullFinalData.csv"
+
+    # Define the output PDF file path
+    output_pdf_file_path = "output_rows.pdf"
+
+    # Call the function to convert CSV to PDF
+    csv_to_pdf_per_row(csv_file_path, output_pdf_file_path)
+
+    # You can also test with a non-existent file to see error handling
+    # csv_to_pdf_per_row("non_existent_file.csv", "error_test.pdf")
