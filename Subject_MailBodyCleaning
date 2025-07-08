@@ -8,6 +8,36 @@ PROBLEM_COLUMN = 'problem_reported' # Name of the problem reported column - **CH
 MAIL_BODY_COLUMN = 'DecodedBody' # Name of the mail body column
 CLEANED_OUTPUT_FILE = 'temp_file.csv' # Output file for cleaned data
 
+# --- Pre-compile regex patterns for performance ---
+
+# Rule 3 specific block (normalized and lowercased for direct string 'in' check)
+_SPECIFIC_BLOCK_RAW = r"""
+b'\n\n \n \n \n\n\n \nInternal \n \n \n \n \n Dear Ravi, \n \n Kindly extend your support to share the Not Dialed reason for below list. Be noted these numbers were uploaded 4 times on 9th Feb\x9224 but was not dialed at all. If it was rescheduled, I need the id with which it rescheduled.\n \n \n \n \n \n \n Not Dialed \n \n \n \n \n 599075055 \n \n \n \n \n 553575999 \n \n \n \n \n 500700044 \n \n \n \n \n 535216630 \n \n \n \n \n 555234049 \n \n \n \n \n 539999495 \n \n \n \n \n 567582101 \n \n \n \n \n 533855394 \n \n \n \n \n 503882099 \n \n \n \n \n 574290175 \n \n \n \n \n 549344233 \n \n \n \n \n 535054455 \n \n \n \n \n 555594490 \n \n \n \n \n 557908696 \n \n \n \n \n 599798668 \n \n \n \n \n 594999991 \n \n \n \n \n 566212252 \n \n \n \n \n 569744688 \n \n \n \n \n 508021971 \n \n \n \n \n 533783672 \n \n \n \n \n 509374590 \n \n \n \n \n 503393098 \n \n \n \n \n 530660812 \n \n \n \n \n 505944473 \n \n \n \n \n 555593243 \n \n \n \n \n 591794555 \n \n \n \n \n 544501684 \n \n \n \n \n 555302289 \n \n \n \n \n 564637219 \n \n \n \n \n 530805808 \n \n
+"""
+_SPECIFIC_BLOCK_NORMALIZED = re.sub(r'\s+', ' ', _SPECIFIC_BLOCK_RAW).strip().lower()
+
+# Rule 4: 'Reply above this line'
+_REPLY_PATTERN = re.compile(r'(?i)(?:^|[\W_]+)Reply above this line')
+
+# Rule 6 (second part): 'This message was created automatically by mail delivery software.'
+_AUTO_MAIL_DELIVERY_PATTERN = re.compile(r'this message was created automatically by mail delivery software', re.IGNORECASE)
+
+# Rule 2: Insert newline before keywords
+_INSERT_NEWLINE_KEYWORDS = [
+    r'Thanks & Regard',
+    r'Best Regards',
+    r'Regards,?', # Matches "Regards" and "Regards,"
+    r'Thanks',
+    r'Thank'
+]
+_COMBINED_INSERT_NEWLINE_PATTERN = re.compile(r'(?i)\b(' + '|'.join(_INSERT_NEWLINE_KEYWORDS) + r')')
+
+# Whitespace normalization patterns
+_MULTIPLE_SPACES_TABS = re.compile(r'[ \t]+')
+_MULTIPLE_NEWLINES = re.compile(r'\n+')
+_SPACES_AROUND_NEWLINES = re.compile(r' ?\n ?')
+
+
 # --- Cleaning Functions ---
 
 def clean_problem_reported_entry(problem_text):
@@ -50,48 +80,28 @@ def clean_decoded_body_entry(body_text):
 
     # --- Apply removal rules first ---
     # Rule 3: Remove if contains the specific large block of text (case insensitive, ignoring whitespace)
-    specific_block = r"""
-    b'\n\n \n \n \n\n\n \nInternal \n \n \n \n \n Dear Ravi, \n \n Kindly extend your support to share the Not Dialed reason for below list. Be noted these numbers were uploaded 4 times on 9th Feb\x9224 but was not dialed at all. If it was rescheduled, I need the id with which it rescheduled.\n \n \n \n \n \n \n Not Dialed \n \n \n \n \n 599075055 \n \n \n \n \n 553575999 \n \n \n \n \n 500700044 \n \n \n \n \n 535216630 \n \n \n \n \n 555234049 \n \n \n \n \n 539999495 \n \n \n \n \n 567582101 \n \n \n \n \n 533855394 \n \n \n \n \n 503882099 \n \n \n \n \n 574290175 \n \n \n \n \n 549344233 \n \n \n \n \n 535054455 \n \n \n \n \n 555594490 \n \n \n \n \n 557908696 \n \n \n \n \n 599798668 \n \n \n \n \n 594999991 \n \n \n \n \n 566212252 \n \n \n \n \n 569744688 \n \n \n \n \n 508021971 \n \n \n \n \n 533783672 \n \n \n \n \n 509374590 \n \n \n \n \n 503393098 \n \n \n \n \n 530660812 \n \n \n \n \n 505944473 \n \n \n \n \n 555593243 \n \n \n \n \n 591794555 \n \n \n \n \n 544501684 \n \n \n \n \n 555302289 \n \n \n \n \n 564637219 \n \n \n \n \n 530805808 \n \n
-    """
-    normalized_block = re.sub(r'\s+', ' ', specific_block).strip().lower()
-    if normalized_block in re.sub(r'\s+', ' ', text).strip().lower():
+    # Normalize the current text for comparison with the pre-normalized specific block
+    normalized_current_text_for_comparison = _MULTIPLE_SPACES_TABS.sub(' ', text).strip().lower()
+    if _SPECIFIC_BLOCK_NORMALIZED in normalized_current_text_for_comparison:
         return None # Remove the entire row if this block is found
 
     # Rule 4: Remove if contains 'Reply above this line' patterns (case insensitive)
-    reply_patterns = r'^-+\s*Reply above this line\s*|^Reply above this line'
-    if re.search(reply_patterns, text, re.IGNORECASE):
+    if _REPLY_PATTERN.search(text):
         return None
 
     # Rule 6 (second part): Remove if contains 'This message was created automatically by mail delivery software.' (case insensitive)
-    if re.search(r'this message was created automatically by mail delivery software', text, re.IGNORECASE):
+    if _AUTO_MAIL_DELIVERY_PATTERN.search(text):
         return None
 
     # --- Apply formatting rules if no removal occurred ---
 
     # Rule 2: Insert newline before 'Regards', 'Thanks & Regard', etc.
-    insert_newline_patterns = [
-        r'Thanks & Regard',
-        r'Best Regards',
-        r'Regards,?', # Matches "Regards" and "Regards,"
-        r'Thanks',
-        r'Thank'
-    ]
-    # Create a single regex pattern for all keywords, ensuring word boundaries where appropriate
-    # (?i) for case-insensitive matching
-    combined_pattern = r'(?i)\b(' + '|'.join(insert_newline_patterns) + r')'
-    
-    # Insert newline BEFORE the matched keyword
-    text_with_inserted_newlines = re.sub(combined_pattern, r'\n\1', text)
+    text_with_inserted_newlines = _COMBINED_INSERT_NEWLINE_PATTERN.sub(r'\n\1', text)
     
     # Normalize all whitespace:
-    # 1. Replace multiple spaces/tabs with a single space.
-    cleaned_text = re.sub(r'[ \t]+', ' ', text_with_inserted_newlines)
-    
-    # 2. Replace multiple newlines with a single newline.
-    cleaned_text = re.sub(r'\n+', '\n', cleaned_text)
-
-    # 3. Remove spaces that are directly adjacent to newlines (e.g., "word \n word" -> "word\nword")
-    cleaned_text = re.sub(r' ?\n ?', '\n', cleaned_text)
+    cleaned_text = _MULTIPLE_SPACES_TABS.sub(' ', text_with_inserted_newlines)
+    cleaned_text = _MULTIPLE_NEWLINES.sub('\n', cleaned_text)
+    cleaned_text = _SPACES_AROUND_NEWLINES.sub('\n', cleaned_text)
     
     # Finally, strip leading/trailing whitespace from the whole string
     cleaned_text = cleaned_text.strip()
@@ -153,3 +163,4 @@ print(cleaned_df.head())
 print(f"\nSaving cleaned DataFrame to '{CLEANED_OUTPUT_FILE}'...")
 cleaned_df.to_csv(CLEANED_OUTPUT_FILE, index=False)
 print(f"Cleaned data saved to '{CLEANED_OUTPUT_FILE}'.")
+
