@@ -1,7 +1,7 @@
 
-!pip install fuzzywuzzy
-!pip install python-Levenshtein
-!pip install nltk
+#!pip install fuzzywuzzy
+#!pip install python-Levenshtein
+#!pip install nltk
 
 import pandas as pd
 import re
