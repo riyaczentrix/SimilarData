@@ -1,0 +1,196 @@
+
+!pip install fuzzywuzzy
+!pip install python-Levenshtein
+!pip install nltk
+
+import pandas as pd
+import re
+import numpy as np # For handling NaN values
+import sys # For printing warnings
+import os # For pip install commands
+
+# --- NLTK Data Download (Run these lines once if you haven't downloaded them) ---
+import nltk
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError: # Changed from nltk.downloader.DownloadError to LookupError
+    nltk.download('punkt', quiet=True) # Ensure 'punkt' is downloaded for tokenization
+try:
+    nltk.data.find('tokenizers/punkt_tab')
+except LookupError: # Changed from nltk.downloader.DownloadError to LookupError
+    nltk.download('punkt_tab', quiet=True) # Download 'punkt_tab' as requested
+
+# --- Import actual email_signature_remover ---
+try:
+    from convosense_utilities import email_signature_remover
+    print("Using 'convosense_utilities.email_signature_remover'.")
+except ImportError:
+    print("Error: 'convosense_utilities' or 'email_reply_parser' not found. "
+          "Please ensure they are installed correctly.", file=sys.stderr)
+    print("Exiting script as email signature removal cannot proceed without the library.", file=sys.stderr)
+    sys.exit(1) # Exit if the core library cannot be imported
+
+
+# --- Configuration ---
+FILE_NAME = 'ticket_details_5000.csv' # Your input CSV file
+PROBLEM_COLUMN = 'problem_reported' # Name of the problem reported column - **CHECK THIS NAME IN YOUR CSV!**
+MAIL_BODY_COLUMN = 'DecodedBody' # This is the original column name for mail body
+CLEANED_OUTPUT_FILE = 'temp_file.csv' # Output file for cleaned data
+
+
+# --- Pre-compile regex patterns for performance ---
+
+# Rule 3 specific block (normalized and lowercased for direct string 'in' check)
+_SPECIFIC_BLOCK_RAW = r"""
+b'\n\n \n \n \n\n\n \nInternal \n \n \n \n \n Dear Ravi, \n \n Kindly extend your support to share the Not Dialed reason for below list. Be noted these numbers were uploaded 4 times on 9th Feb\x9224 but was not dialed at all. If it was rescheduled, I need the id with which it rescheduled.\n \n \n \n \n \n \n Not Dialed \n \n \n \n \n 599075055 \n \n \n \n \n 553575999 \n \n \n \n \n 500700044 \n \n \n \n \n 535216630 \n \n \n \n \n 555234049 \n \n \n \n \n 539999495 \n \n \n \n \n 567582101 \n \n \n \n \n 533855394 \n \n \n \n \n 503882099 \n \n \n \n \n 574290175 \n \n \n \n \n 549344233 \n \n \n \n \n 535054455 \n \n \n \n \n 555594490 \n \n \n \n \n 557908696 \n \n \n \n \n 599798668 \n \n \n \n \n 594999991 \n \n \n \n \n 566212252 \n \n \n \n \n 569744688 \n \n \n \n \n 508021971 \n \n \n \n \n 533783672 \n \n \n \n \n 509374590 \n \n \n \n \n 503393098 \n \n \n \n \n 530660812 \n \n \n \n \n 505944473 \n \n \n \n \n 555593243 \n \n \n \n \n 591794555 \n \n \n \n \n 544501684 \n \n \n \n \n 555302289 \n \n \n \n \n 564637219 \n \n \n \n \n 530805808 \n \n
+"""
+_SPECIFIC_BLOCK_NORMALIZED = re.sub(r'\s+', ' ', _SPECIFIC_BLOCK_RAW).strip().lower()
+
+# Rule 2: Insert newline before keywords
+_INSERT_NEWLINE_KEYWORDS = [
+    r'Thanks & Regard',
+    r'Best Regards',
+    r'Regards,?', # Matches "Regards" and "Regards,"
+    r'Thanks',
+    r'Thank'
+]
+_COMBINED_INSERT_NEWLINE_PATTERN = re.compile(r'(?i)\b(' + '|'.join(_INSERT_NEWLINE_KEYWORDS) + r')')
+
+# Whitespace normalization patterns
+_MULTIPLE_SPACES_TABS = re.compile(r'[ \t]+')
+_MULTIPLE_NEWLINES = re.compile(r'\n+')
+_SPACES_AROUND_NEWLINES = re.compile(r' ?\n ?')
+
+
+# --- Cleaning Functions ---
+
+def clean_problem_reported_entry(problem_text):
+    """
+    Cleans a single problem reported entry based on specified rules.
+    Returns None if the entry should be removed, otherwise returns the cleaned text.
+    """
+    if pd.isna(problem_text) or not str(problem_text).strip():
+        return None # Remove if NaN or empty/whitespace
+
+    text = str(problem_text).strip()
+
+    # Rule 1: Remove if starts with 're', 'fwd:', 'fw' (case insensitive)
+    if re.match(r'^(re|fwd:|fw)\s*:', text, re.IGNORECASE):
+        return None
+
+    # Rule 5: Remove if contains 'Mail Delivery Failure' or 'Mail delivery failed' (case insensitive)
+    if re.search(r'mail delivery failure|mail delivery failed', text, re.IGNORECASE):
+        return None
+
+    # Rule 6 (first part): Remove if contains 'Undeliverable' (case insensitive)
+    if re.search(r'undeliverable', text, re.IGNORECASE):
+        return None
+
+    # Rule 7: Remove if contains 'Resolved', 'Warning', 'Disaster', 'High' (case insensitive)
+    if re.search(r'resolved|warning|disaster|high', text, re.IGNORECASE):
+        return None
+
+    return text # Return original text if no removal rule matched
+
+def clean_decoded_body_initial_pass(body_text):
+    """
+    Performs initial cleaning on the decoded body, including newline insertions
+    and basic whitespace normalization. Does NOT remove signatures yet.
+    Returns None if the entry should be removed by initial rules, otherwise returns the cleaned text.
+    """
+    if pd.isna(body_text) or not str(body_text).strip():
+        return None # Remove if NaN or empty/whitespace
+
+    text = str(body_text) # Keep original casing and punctuation for splitting/matching
+
+    # --- Apply removal rules first ---
+    # Rule 3: Remove if contains the specific large block of text (case insensitive, ignoring whitespace)
+    normalized_current_text_for_comparison = _MULTIPLE_SPACES_TABS.sub(' ', text).strip().lower()
+    if _SPECIFIC_BLOCK_NORMALIZED in normalized_current_text_for_comparison:
+        return None # Remove the entire row if this block is found
+
+    # Rule 4: Removed direct regex for 'Reply above this line' as it's handled by email_signature_remover
+    # Rule 6 (second part): Removed direct regex for 'This message was created automatically by mail delivery software.' as it's handled by email_signature_remover
+
+    # --- Apply formatting rules if no removal occurred ---
+
+    # Rule 2: Insert newline AFTER 'Regards', 'Thanks & Regard', etc.
+    text_with_inserted_newlines = _COMBINED_INSERT_NEWLINE_PATTERN.sub(r'\1\n', text)
+
+    # Normalize all whitespace:
+    cleaned_text = _MULTIPLE_SPACES_TABS.sub(' ', text_with_inserted_newlines)
+    cleaned_text = _MULTIPLE_NEWLINES.sub('\n', cleaned_text)
+    cleaned_text = _SPACES_AROUND_NEWLINES.sub('\n', cleaned_text)
+
+    # Finally, strip leading/trailing whitespace from the whole string
+    cleaned_text = cleaned_text.strip()
+
+    return cleaned_text
+
+# --- Load the dataset from CSV ---
+# Check if the file exists before attempting to load it
+if not os.path.exists(FILE_NAME):
+    print(f"Error: '{FILE_NAME}' not found. Please ensure the file is in the same directory as the script or provide the full path.")
+    sys.exit(1) # Exit gracefully if the file is not found
+
+try:
+    df = pd.read_csv(FILE_NAME, encoding='latin1') # Changed encoding to latin1
+    print(f"Successfully loaded '{FILE_NAME}'.")
+    print(f"Total rows in raw DataFrame: {len(df)}")
+    print("\n--- Head of RAW DataFrame before cleaning ---")
+    print(df.head())
+except UnicodeDecodeError as e:
+    print(f"Error: Could not decode the file with 'latin1' encoding. Please check the file encoding or try another one. Details: {e}")
+    print("Common encodings to try: 'utf-8', 'cp1252'")
+    sys.exit(1) # Exit on decoding error
+except Exception as e:
+    print(f"An error occurred while loading the CSV file: {e}")
+    sys.exit(1) # Exit on any other loading error
+
+# Ensure required columns exist
+required_columns = [MAIL_BODY_COLUMN, PROBLEM_COLUMN]
+for col in required_columns:
+    if col not in df.columns:
+        print(f"Error: Column '{col}' not found in '{FILE_NAME}'. Please check the column name.")
+        print(f"Available columns are: {df.columns.tolist()}") # This line will now print available columns
+        sys.exit(1) # Exit if required columns are missing
+
+# --- Apply Cleaning ---
+print("\nApplying cleaning rules...")
+
+# Create a copy to store cleaned data and avoid modifying original df directly during iteration
+cleaned_df = df.copy()
+
+# Apply cleaning for Problem Reported column
+# Use .apply and then filter rows where the result is None
+cleaned_df['temp_problem_reported'] = cleaned_df[PROBLEM_COLUMN].apply(clean_problem_reported_entry)
+cleaned_df = cleaned_df.dropna(subset=['temp_problem_reported']) # Drop rows where problem_reported became None
+print(f"Remaining rows after problem_reported cleaning: {len(cleaned_df)}")
+cleaned_df[PROBLEM_COLUMN] = cleaned_df['temp_problem_reported'] # Update the column
+cleaned_df = cleaned_df.drop(columns=['temp_problem_reported']) # Remove temp column
+
+# Apply initial cleaning for DecodedBody column and create DecodedBody_cleaned
+cleaned_df['DecodedBody_cleaned'] = cleaned_df[MAIL_BODY_COLUMN].apply(clean_decoded_body_initial_pass)
+# Drop rows where DecodedBody_cleaned became None after initial pass
+cleaned_df = cleaned_df.dropna(subset=['DecodedBody_cleaned'])
+print(f"Remaining rows after initial DecodedBody cleaning: {len(cleaned_df)}")
+
+# --- Apply email signature removal to the already created DecodedBody_cleaned column ---
+print("Applying email signature removal to 'DecodedBody_cleaned' column...")
+# Apply signature removal and store the result back into DecodedBody_cleaned
+cleaned_df['DecodedBody_cleaned'] = cleaned_df['DecodedBody_cleaned'].apply(email_signature_remover.remove_sign)
+# Drop rows where DecodedBody_cleaned became empty after signature removal
+cleaned_df = cleaned_df.dropna(subset=['DecodedBody_cleaned'])
+print(f"Remaining rows after signature removal: {len(cleaned_df)}")
+
+
+print(f"Cleaning complete. Remaining rows: {len(cleaned_df)}")
+
+# --- Display the first few rows of the cleaned DataFrame ---
+print(f"\n--- Head of Cleaned DataFrame ({CLEANED_OUTPUT_FILE}) ---")
+print(cleaned_df.head())
+
+# --- Save the cleaned DataFrame to a new CSV file ---
+print(f"\nSaving cleaned DataFrame to '{CLEANED_OUTPUT_FILE}'...")
+cleaned_df.to_csv(CLEANED_OUTPUT_FILE, index=False)
+print(f"Cleaned data saved to '{CLEANED_OUTPUT_FILE}'.")
