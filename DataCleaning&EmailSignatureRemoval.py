@@ -27,7 +27,7 @@ except ImportError:
 
 
 # --- Configuration ---
-FILE_NAME = 'fulldata.csv' # Your input CSV file
+FILE_NAME = 'ticket_details_5000.csv' # Your input CSV file
 PROBLEM_COLUMN = 'problem_reported' # Name of the problem reported column - **CHECK THIS NAME IN YOUR CSV!**
 MAIL_BODY_COLUMN = 'DecodedBody' # This is the original column name for mail body
 CLEANED_OUTPUT_FILE = 'temp_file.csv' # Output file for cleaned data
@@ -123,22 +123,24 @@ def clean_decoded_body_initial_pass(body_text):
     return cleaned_text
 
 # --- Load the dataset from CSV ---
+# Check if the file exists before attempting to load it
+if not os.path.exists(FILE_NAME):
+    print(f"Error: '{FILE_NAME}' not found. Please ensure the file is in the same directory as the script or provide the full path.")
+    sys.exit(1) # Exit gracefully if the file is not found
+
 try:
     df = pd.read_csv(FILE_NAME, encoding='mac_roman')
     print(f"Successfully loaded '{FILE_NAME}'.")
     print(f"Total rows in raw DataFrame: {len(df)}")
     print("\n--- Head of RAW DataFrame before cleaning ---")
     print(df.head())
-except FileNotFoundError:
-    print(f"Error: '{FILE_NAME}' not found. Please ensure the file is in the same directory as the script.")
-    exit()
 except UnicodeDecodeError as e:
     print(f"Error: Could not decode the file with 'mac_roman' encoding. Please check the file encoding or try another one. Details: {e}")
     print("Common encodings to try: 'utf-8', 'latin1', 'cp1252'")
-    exit()
+    sys.exit(1) # Exit on decoding error
 except Exception as e:
     print(f"An error occurred while loading the CSV file: {e}")
-    exit()
+    sys.exit(1) # Exit on any other loading error
 
 # Ensure required columns exist
 required_columns = [MAIL_BODY_COLUMN, PROBLEM_COLUMN]
@@ -146,7 +148,7 @@ for col in required_columns:
     if col not in df.columns:
         print(f"Error: Column '{col}' not found in '{FILE_NAME}'. Please check the column name.")
         print(f"Available columns are: {df.columns.tolist()}") # This line will now print available columns
-        exit()
+        sys.exit(1) # Exit if required columns are missing
 
 # --- Apply Cleaning ---
 print("\nApplying cleaning rules...")
