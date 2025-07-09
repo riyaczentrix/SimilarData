@@ -1,0 +1,35 @@
+"SELECT \n" +
+            "    m.docket_no,\n" +
+            "    GROUP_CONCAT(\n" +
+            "        DISTINCT sub.mail_list_id \n" +
+            "        ORDER BY sub.mail_list_id DESC \n" +
+            "        SEPARATOR ', '\n" +
+            "    ) AS mail_list_id,\n" +
+            "    GROUP_CONCAT(sub.mail_id ORDER BY sub.mail_id DESC SEPARATOR ', ') AS mail_id,\n" +
+            "    MAX(m.subject) AS subject,\n" +
+            "    MAX(t.ticket_id) AS ticket_id,\n" +
+            "    MAX(t.disposition_name) AS disposition_name,\n" +
+            "    MAX(t.sub_disposition_name) AS sub_disposition_name,\n" +
+            "    MAX(t.priority_name) AS priority_name,\n" +
+            "    MAX(t.problem_reported) AS problem_reported,\n" +
+            "    MAX(t.assigned_to_dept_name) AS assigned_to_dept_name,\n" +
+            "    MAX(t.assigned_to_user_name) AS assigned_to_user_name\n" +
+            "FROM mail AS m\n" +
+            "INNER JOIN  ticket_details_2024_01   AS t\n" +
+            "    ON m.ticket_id = t.ticket_id\n" +
+            "INNER JOIN (\n" +
+            "    SELECT DISTINCT mail_list_id, mail_id, docket_no, ticket_id\n" +
+            "    FROM mail\n" +
+            "    WHERE mail_list_id <> 0\n" +
+            ") AS sub\n" +
+            "    ON m.docket_no = sub.docket_no AND m.mail_id = sub.mail_id\n" +
+            "WHERE\n" +
+            "    t.disposition_name IS NOT NULL AND TRIM(t.disposition_name) <> ''\n" +
+            "    AND t.sub_disposition_name IS NOT NULL AND TRIM(t.sub_disposition_name) <> ''\n" +
+            "    AND t.sub_disposition_name <> 'Zabix issue'\n" +
+            "    AND t.priority_name IS NOT NULL AND TRIM(t.priority_name) <> ''\n" +
+            "    AND t.problem_reported IS NOT NULL AND TRIM(t.problem_reported) <> ''\n" +
+            "    AND t.assigned_to_dept_name IS NOT NULL AND TRIM(t.assigned_to_dept_name) <> ''\n" +
+            "    AND t.assigned_to_user_name IS NOT NULL AND TRIM(t.assigned_to_user_name) <> ''\n" +
+            "GROUP BY m.docket_no\n" +
+            "ORDER BY m.docket_no DESC";
