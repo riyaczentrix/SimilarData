@@ -18,16 +18,47 @@ except nltk.downloader.DownloadError:
     nltk.download('punkt_tab')
     print("Download complete.")
 
-def process_text_column(input_csv_path, output_csv_path, column_name='DecodedBody'):
+def remove_re_fw_rows(df, column_name='problem_reported'):
+    """
+    Removes rows from the DataFrame where the specified column contains "re:" or "fw:" (case-insensitive).
+
+    Args:
+        df (pd.DataFrame): The input DataFrame.
+        column_name (str): The name of the column to check for "re:" or "fw:".
+
+    Returns:
+        pd.DataFrame: The DataFrame with the specified rows removed.
+    """
+    if column_name not in df.columns:
+        print(f"Warning: Column '{column_name}' not found for 're:'/'fw:' check. Skipping row removal.")
+        return df
+
+    initial_rows = len(df)
+    # Create a boolean mask: True for rows to keep, False for rows to remove
+    # We use .astype(str) to handle potential non-string types in the column
+    mask = ~df[column_name].astype(str).str.contains(r're:|fw:', case=False, na=False)
+    df_filtered = df[mask].copy() # Use .copy() to avoid SettingWithCopyWarning
+    
+    removed_rows = initial_rows - len(df_filtered)
+    if removed_rows > 0:
+        print(f"Removed {removed_rows} rows containing 're:' or 'fw:' in the '{column_name}' column.")
+    else:
+        print(f"No rows found with 're:' or 'fw:' in the '{column_name}' column to remove.")
+    
+    return df_filtered
+
+def process_text_column(input_csv_path, output_csv_path, problem_reported_column='problem_reported', decoded_body_column='DecodedBody'):
     """
     Processes a specified text column in a CSV file:
-    1. Adds a full stop and newlines around specific keywords.
-    2. Removes email signatures using convosense_utilities.
+    1. Removes rows where 'problem_reported' column contains 're:' or 'fw:'.
+    2. Adds a full stop and newlines around specific keywords in 'DecodedBody'.
+    3. Removes email signatures using convosense_utilities from 'DecodedBody'.
 
     Args:
         input_csv_path (str): Path to the input CSV file.
         output_csv_path (str): Path to save the processed CSV file.
-        column_name (str): The name of the column containing the text to process.
+        problem_reported_column (str): The name of the column to check for 're:'/'fw:'.
+        decoded_body_column (str): The name of the column containing the text to process for keywords and signatures.
     """
     # Check if the input file exists at the specified path
     if not os.path.exists(input_csv_path):
@@ -43,8 +74,11 @@ def process_text_column(input_csv_path, output_csv_path, column_name='DecodedBod
         print(f"Error reading CSV file at '{os.path.abspath(input_csv_path)}': {e}")
         return
 
-    if column_name not in df.columns:
-        print(f"Error: Column '{column_name}' not found in the CSV file.")
+    # --- NEW: Remove rows based on 'problem_reported' column ---
+    df = remove_re_fw_rows(df, column_name=problem_reported_column)
+    
+    if decoded_body_column not in df.columns:
+        print(f"Error: Column '{decoded_body_column}' not found in the CSV file for text processing.")
         print(f"Available columns are: {df.columns.tolist()}")
         return
 
@@ -64,7 +98,8 @@ def process_text_column(input_csv_path, output_csv_path, column_name='DecodedBod
 
     # Apply the transformation and signature removal
     processed_texts = []
-    for text in df[column_name].astype(str): # Ensure text is treated as string
+    # Ensure text is treated as string for processing, handling potential NaNs gracefully
+    for text in df[decoded_body_column].astype(str):
         modified_text = text
 
         # Step 1, 2, 3: Add full stop, break lines around keywords
@@ -82,7 +117,6 @@ def process_text_column(input_csv_path, output_csv_path, column_name='DecodedBod
             # Apply signature removal *after* keyword formatting
             cleaned_text = email_signature_remover.remove_sign(modified_text)
             processed_texts.append(cleaned_text)
-            # print(f"Cleaned text snippet:\n'{cleaned_text[:50]}...'\n") # For debugging/demonstration
         except Exception as e:
             print(f"Error removing signature for text: '{modified_text[:100]}...' - {e}")
             processed_texts.append(modified_text) # Append original if error occurs
@@ -99,12 +133,14 @@ def process_text_column(input_csv_path, output_csv_path, column_name='DecodedBod
         print(f"Error saving processed CSV file: {e}")
 
 # Define input and output CSV file paths
-# IMPORTANT: This has been corrected to the file name you provided.
 input_csv_file = 'ticket_details_5000.csv'
 output_csv_file = 'processed_emails.csv'
 
 # Run the processing function
-process_text_column(input_csv_file, output_csv_file)
+# Note: I've added 'problem_reported' as an argument for clarity,
+# assuming 'problem_reported' is the column you want to check for 're:'/'fw:'.
+# If this column name is different, please update it here.
+process_text_column(input_csv_file, output_csv_file, problem_reported_column='problem_reported', decoded_body_column='DecodedBody')
 
 # You can optionally print the first few rows of the processed file to verify
 print("\n--- First 5 rows of the processed CSV ---")
@@ -113,5 +149,3 @@ try:
     print(processed_df.head())
 except Exception as e:
     print(f"Could not read processed CSV for display: {e}")
-
-
