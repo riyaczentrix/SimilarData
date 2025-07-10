@@ -1,573 +1,117 @@
+# Install necessary libraries (uncomment to run in a local environment if not already installed)
+# !pip install pandas
+# !pip install email_reply_parser
+# !pip install convosense_utilities
+# !pip install nltk
+
 import pandas as pd
 import re
-import numpy as np
-import sys
-import os
 import nltk
+from convosense_utilities import email_signature_remover
+import os
 
-# --- NLTK Data Download (Run these lines once if you haven't downloaded them) ---
-try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    print("NLTK 'punkt' tokenizer not found, downloading...")
-    nltk.download('punkt', quiet=True)
+# Download NLTK data required by convosense_utilities
 try:
     nltk.data.find('tokenizers/punkt_tab')
-except LookupError:
-    print("NLTK 'punkt_tab' tokenizer not found, downloading...")
-    nltk.download('punkt_tab', quiet=True)
-try:
-    nltk.data.find('corpora/wordnet')
-except LookupError:
-    print("NLTK 'wordnet' corpus not found, downloading...")
-    nltk.download('wordnet', quiet=True)
+except nltk.downloader.DownloadError:
+    print("Downloading 'punkt_tab' NLTK data...")
+    nltk.download('punkt_tab')
+    print("Download complete.")
 
+def process_text_column(input_csv_path, output_csv_path, column_name='DecodedBody'):
+    """
+    Processes a specified text column in a CSV file:
+    1. Adds a full stop and newlines around specific keywords.
+    2. Removes email signatures using convosense_utilities.
 
-# --- Import actual email_signature_remover or email_reply_parser ---
-# This block attempts to import convosense_utilities first, then falls back to email_reply_parser,
-# and finally provides a basic mock if neither is available.
-try:
-    # Attempt to import convosense_utilities (if available in the environment)
-    from convosense_utilities import email_signature_remover
-    print("Using 'convosense_utilities.email_signature_remover'.")
-except ImportError:
+    Args:
+        input_csv_path (str): Path to the input CSV file.
+        output_csv_path (str): Path to save the processed CSV file.
+        column_name (str): The name of the column containing the text to process.
+    """
+    # Check if the input file exists at the specified path
+    if not os.path.exists(input_csv_path):
+        print(f"Error: Input CSV file NOT FOUND at '{os.path.abspath(input_csv_path)}'.")
+        print("Please ensure the file name matches exactly, including any spaces or parentheses,")
+        print("and that the file is in the same directory as this script, or provide its full path.")
+        return
+
     try:
-        # Fallback to email_reply_parser if convosense_utilities is not found
-        from email_reply_parser import EmailReplyParser
-        print("Warning: 'convosense_utilities' not found. Using 'email_reply_parser'.")
-        class EmailSignatureRemoverProxy:
-            def remove_sign(self, text):
-                if not isinstance(text, str):
-                    return ""
-                # email_reply_parser.EmailReplyParser.parse_reply is the core function
-                return EmailReplyParser.parse_reply(text)
-        email_signature_remover = EmailSignatureRemoverProxy()
-    except ImportError:
-        # If neither library is available, use a basic regex-based mock
-        print("Error: Neither 'convosense_utilities' nor 'email_reply_parser' found. "
-              "Using a basic regex-based mock for signature cleaning. "
-              "Please ensure one of these libraries is installed for better functionality (e.g., pip install email_reply_parser).", file=sys.stderr)
-        class MockEmailSignatureRemover:
-            def remove_sign(self, text):
-                """
-                A mock function to simulate email signature removal using basic regex.
-                This is a fallback if no dedicated library is found.
-                It aims to remove common reply headers, disclaimers, and system report blocks.
-                """
-                if not isinstance(text, str):
-                    return ""
-                
-                lines = text.split('\n')
-                
-                # Patterns for common reply headers and signature start markers
-                # These are usually at the beginning of a block to be removed by the signature remover.
-                # Patterns that trigger full row removal are handled in clean_decoded_body (Phase 0).
-                reply_and_signature_block_starters = [
-                    r"^\s*On\s+.+?wrote:",
-                    r"^\s*-----Original Message-----",
-                    r"^\s*[\-_=]{5,}\s*Original Message[\-_=]{5,}",
-                    r"^\s*From:[\s\S]*?Sent:[\s\S]*?To:[\s\S]*?Subject:", # Outlook style header
-                    r"^\s*View request\s*·\s*Turn off this request's notifications",
-                    r"^\s*This is shared with",
-                    r"^\s*Powered by Jira Service Management",
-                    r"^\s*Sent on\s*(?:January|February|March|April|May|June|July|August|September|October|November|December)\s*::IST",
-                    r"^\s*CONFIDENTIALITY NOTICE:",
-                    r"^\s*NOTICE: This e-mail and any files transmitted with it are confidential and legally privileged",
-                    r"^\s*This email and any files transmitted with it are confidential and intended solely",
-                    r"^\s*LEGAL DISCLAIMER: The information in this email is confidential and may be legally privileged",
-                    r"^\s*----- Disclaimer -----",
-                    r"^\s*Hyper-V Environment Report:", # Added for system reports
-                    r"^\s*VCenter Environment Report:", # Added for system reports
-                    r"^\s*Cluster Overview \(VcenterCluster\)", # Added for system reports
-                    r"^\s*[\-_=]{5,}\s*$", # Generic separator line
-                ]
+        df = pd.read_csv(input_csv_path)
+        print(f"Successfully loaded '{os.path.abspath(input_csv_path)}' with {len(df)} rows.")
+    except Exception as e:
+        print(f"Error reading CSV file at '{os.path.abspath(input_csv_path)}': {e}")
+        return
 
-                # Patterns for lines that are typically part of a signature, but might not be a "start" marker
-                # These are used to identify lines to remove from the bottom up.
-                # IMPORTANT: "Thanks", "Regards", "Best Regards" are NOT included here, as user wants newlines AFTER them,
-                # and their removal is handled by the main clean_decoded_body function's explicit checks.
-                signature_content_patterns = [
-                    r"^\s*Sincerely",
-                    r"^\s*Contact:",
-                    r"^\s*Email:",
-                    r"^\s*Mobile\s*number:",
-                    r"^\s*Handset:",
-                    r"^\s*TOC\s*Engineer",
-                    r"^\s*Shift\s*Lead",
-                    r"^\s*Operations",
-                    r"^\s*Central TOC",
-                    r"^\s*\[cid:image\d+\.png@\d+\.\d+\]", # Common image placeholders in signatures
-                    r"^\s*http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+", # URLs
-                    r"^\s*\+?\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{4,9}\b", # Phone numbers
-                    r"^\s*[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", # Email addresses
-                    r"^\s*Piyush Kant|Chandan Maiti|Sagar Luthra|Arvind Mishra|Suraj Kumar Padhy|Manish Rai|SANJEEV BHARTI|Naveen Kumar", # Specific names
-                    # Added patterns for system report data
-                    r"^\s*Ipv4\s*:",
-                    r"^\s*Mac\s*:",
-                    r"^\s*Hard disk \d+=\d+\s*GB",
-                    r"^\s*DNS\s*:",
-                    r"^\s*poweredOn\s*\d+\s*Days",
-                    r"^\s*poweredOff\s*\d+\s*Days",
-                    r"^\s*\d+\s*CPU\s*\d+\s*GB",
-                    r"^\s*Update Available",
-                    r"^\s*UPTO Date",
-                    r"^\s*Total Nodes",
-                    r"^\s*Running Nodes",
-                    r"^\s*Logical Processors",
-                    r"^\s*Total Memory",
-                    r"^\s*Free Memory",
-                    r"^\s*Total Storage",
-                    r"^\s*Free Storage",
-                    r"^\s*Total VM",
-                    r"^\s*Running VM",
-                    r"^\s*vProcessor",
-                    r"^\s*vMemory",
-                    r"^\s*vStorage Used",
-                    r"^\s*vStorage",
-                    r"^\s*Clustered Disks/Volumes",
-                    r"^\s*Virtual Machines",
-                    r"^\s*Name\s+State\s+Uptime\s+Host\s+vCPU\s+vRAM\s+VMWare Tool Status",
-                    r"^\s*Generated on\s+.*IST\s+\d{4}",
-                ]
+    if column_name not in df.columns:
+        print(f"Error: Column '{column_name}' not found in the CSV file.")
+        print(f"Available columns are: {df.columns.tolist()}")
+        return
 
-                first_block_start_index = len(lines)
-                for i, line in enumerate(lines):
-                    for pattern in reply_and_signature_block_starters:
-                        if re.search(pattern, line, flags=re.IGNORECASE | re.DOTALL):
-                            first_block_start_index = i
-                            break
-                    if first_block_start_index != len(lines):
-                        break
-                
-                candidate_lines = lines[:first_block_start_index]
-
-                actual_message_end_index = len(candidate_lines) - 1
-                for i in range(len(candidate_lines) - 1, -1, -1):
-                    line = candidate_lines[i]
-                    is_signature_content = False
-                    for pattern in signature_content_patterns:
-                        if re.search(pattern, line, flags=re.IGNORECASE | re.DOTALL):
-                            is_signature_content = True
-                            break
-                    
-                    if is_signature_content or not line.strip():
-                        actual_message_end_index = i - 1
-                    else:
-                        break
-
-                cleaned_text = "\n".join(candidate_lines[:actual_message_end_index + 1])
-                cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
-                cleaned_text = cleaned_text.strip()
-                
-                return cleaned_text
-        email_signature_remover = MockEmailSignatureRemover()
-
-
-# --- Configuration ---
-FILE_NAME = 'ticket_details_5000.csv' # Your input CSV file
-PROBLEM_COLUMN = 'problem_reported' # Name of the problem reported column
-MAIL_BODY_COLUMN = 'DecodedBody' # Original column name for mail body
-CLEANED_OUTPUT_FILE = 'temp_file.csv' # Output file for cleaned data
-
-
-# --- Pre-compile regex patterns for performance ---
-
-# Specific multi-line pattern to be completely removed from DecodedBody (User Request 3)
-# Note: The 'b' prefix in the user's example indicates a byte string, but Python strings
-# will be matched against this. Newlines and spaces are important for this pattern.
-SPECIFIC_DECODED_BODY_PATTERN = r"""
-Internal 
- 
- 
- 
- 
- Dear Ravi, 
- 
- Kindly extend your support to share the Not Dialed reason for below list. Be noted these numbers were uploaded 4 times on 9th Feb’24 but was not dialed at all. If it was rescheduled, I need the id with which it rescheduled.
- 
- 
- 
- 
- 
- 
- Not Dialed 
- 
- 
- 
- 
- 599075055 
- 
- 
- 
- 
- 553575999 
- 
- 
- 
- 
- 500700044 
- 
- 
- 
- 
- 535216630 
- 
- 
- 
- 
- 555234049 
- 
- 
- 
- 
- 539999495 
- 
- 
- 
- 
- 567582101 
- 
- 
- 
- 
- 533855394 
- 
- 
- 
- 
- 503882099 
- 
- 
- 
- 
- 574290175 
- 
- 
- 
- 
- 549344233 
- 
- 
- 
- 
- 535054455 
- 
- 
- 
- 
- 555594490 
- 
- 
- 
- 
- 557908696 
- 
- 
- 
- 
- 599798668 
- 
- 
- 
- 
- 594999991 
- 
- 
- 
- 
- 566212252 
- 
- 
- 
- 
- 569744688 
- 
- 
- 
- 
- 508021971 
- 
- 
- 
- 
- 533783672 
- 
- 
- 
- 
- 509374590 
- 
- 
- 
- 
- 503393098 
- 
- 
- 
- 
- 530660812 
- 
- 
- 
- 
- 505944473 
- 
- 
- 
- 
- 555593243 
- 
- 
- 
- 
- 591794555 
- 
- 
- 
- 
- 544501684 
- 
- 
- 
- 
- 555302289 
- 
- 
- 
- 
- 564637219 
- 
- 
- 
- 
- 530805808 
- 
-"""
-# Normalize whitespace in the pattern for robust matching
-_SPECIFIC_BLOCK_NORMALIZED = re.sub(r'\s+', ' ', SPECIFIC_DECODED_BODY_PATTERN).strip().lower()
-
-# Keywords to insert newlines after (User Request 2 & 9)
-_NEWLINE_INSERTION_KEYWORDS = [
-    r'Thanks\s*&\s*Regards',
-    r'Thanks\s+and\s+Regards',
-    r'Best\s+Regards',
-    r'Regards,?', # Matches "Regards" and "Regards,"
-    r'Thanks',
-    r'Thank'
-]
-
-
-# --- Cleaning Functions ---
-
-def clean_problem_reported_entry(problem_text):
-    """
-    Cleans a single problem reported entry based on specified rules.
-    Returns None if the entry should be removed (meaning the entire row is dropped),
-    otherwise returns the cleaned text.
-
-    Rules applied (User Requests 1, 5, 6, 7):
-    - Remove if starts with 're', 'fwd:', 'fw' (case insensitive).
-    - Remove if contains 'Mail Delivery Failure' or 'Mail delivery failed' (case insensitive).
-    - Remove if contains 'Undeliverable' (case insensitive).
-    - Remove if contains 'Resolved', 'Warning', 'Disaster', 'High' (case insensitive).
-    """
-    if pd.isna(problem_text) or not str(problem_text).strip():
-        return None # Remove if NaN or empty/whitespace
-
-    text = str(problem_text).strip()
-
-    # Rule 1: Remove if starts with 're', 'fwd:', 'fw' (case insensitive)
-    if re.match(r'^(re|fwd:|fw)\s*:', text, re.IGNORECASE):
-        return None
-
-    # Rule 5: Remove if contains 'Mail Delivery Failure' or 'Mail delivery failed' (case insensitive)
-    if re.search(r'mail delivery failure|mail delivery failed', text, re.IGNORECASE):
-        return None
-
-    # Rule 6: Remove if contains 'Undeliverable' (case insensitive)
-    if re.search(r'undeliverable', text, re.IGNORECASE):
-        return None
-
-    # Rule 7: Remove if contains 'Resolved', 'Warning', 'Disaster', 'High' (case insensitive)
-    if re.search(r'resolved|warning|disaster|high', text, re.IGNORECASE):
-        return None
-
-    return text # Return original text if no removal rule matched
-
-def clean_decoded_body(text):
-    """
-    Cleans the email body by applying several rules:
-    - Removes specific large block of text (User Request 3).
-    - Removes specific reply/auto-generated lines (User Requests 4, 6, 8).
-    - Inserts newlines after specific signature phrases (User Request 2 & 9).
-    - Applies email_signature_remover (or its mock) for general reply chain and disclaimer removal.
-    - Normalizes whitespace.
-    Returns an empty string if the body becomes empty or non-meaningful after cleaning.
-    """
-    if not isinstance(text, str):
-        return ""
-
-    cleaned_text = text.strip()
-
-    # --- Phase 0: Specific block and hard-coded reply/auto-generated message removal (User Requests 3, 4, 6, 8) ---
-    # These checks lead to the entire row being dropped if matched.
-    normalized_current_text_for_comparison = re.sub(r'\s+', ' ', cleaned_text).strip().lower()
-    if _SPECIFIC_BLOCK_NORMALIZED in normalized_current_text_for_comparison:
-        return "" # Return empty string if the specific pattern is found (leading to row removal)
-
-    # Check for specific reply/auto-generated lines that should trigger row removal
-    if re.search(r'reply above this line', cleaned_text, re.IGNORECASE) or \
-       re.search(r'this message was created automatically by mail delivery software', cleaned_text, re.IGNORECASE) or \
-       re.search(r'‚Äî-‚Äî-‚Äî-‚Äî Reply above this line', cleaned_text, re.IGNORECASE):
-        return "" # Return empty string to trigger row removal
-
-    # --- Phase 1: Initial Replacements for Newline Feature (based on user examples) ---
-    # These replacements help the newline insertion and signature remover
-    cleaned_text = re.sub(r'\bsnip\b', 'Thanks and regards', cleaned_text, flags=re.IGNORECASE)
-    cleaned_text = re.sub(r'\bDisclaimer\b', 'Thanks and regards', cleaned_text, flags=re.IGNORECASE)
-
-    # --- Phase 2: Insert newlines AFTER specific signature phrases (User Request 2 & 9) ---
-    # This pre-processing helps to format the desired output for specific signature elements.
-    for pattern_str in _NEWLINE_INSERTION_KEYWORDS:
-        # Match the keyword, followed by optional whitespace, then a non-newline character
-        # (to avoid adding newline if one already exists).
-        # Replaces with the matched keyword, a newline, and then the captured following characters.
-        cleaned_text = re.sub(r'(' + pattern_str + r')([ \t]*(?!\n))', r'\1\n\2', cleaned_text, flags=re.IGNORECASE)
-
-    # --- Phase 3: Apply email_signature_remover for comprehensive general cleaning ---
-    # This handles removal of general reply chains and disclaimers.
-    # Note: If 'email_reply_parser' is used, its behavior for the specific phrases
-    # in _NEWLINE_INSERTION_KEYWORDS is external and cannot be controlled by this script.
-    # The MockEmailSignatureRemover has been adjusted to be less aggressive on these.
-    cleaned_text = email_signature_remover.remove_sign(cleaned_text)
-
-    # --- Final Normalization (whitespace, newlines) ---
-    # Normalize multiple newlines to at most two (representing a paragraph break)
-    cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
-    
-    # Strip leading/trailing whitespace from each line, then from the whole text
-    text_lines_processed = []
-    for line in cleaned_text.split('\n'):
-        stripped_line = line.strip()
-        if stripped_line:
-            text_lines_processed.append(stripped_line)
-        elif line: # Keep empty lines if they were not just whitespace
-            text_lines_processed.append('')
-    
-    cleaned_text = "\n".join(text_lines_processed)
-    cleaned_text = cleaned_text.strip()
-
-    # --- Final check for "meaningful" content (after all cleaning) ---
-    # If the text is now empty or only contains whitespace, return an empty string.
-    if not cleaned_text:
-        return ""
-
-    return cleaned_text
-
-
-# --- Main execution ---
-print(f"Loading data from '{FILE_NAME}' with 'latin1' encoding...")
-try:
-    df = pd.read_csv(FILE_NAME, encoding='latin1')
-    df = df.fillna('') # Fill NaN values with empty strings immediately after loading
-    print(f"Initial rows loaded: {len(df)}")
-    print("\n--- Head of RAW DataFrame before cleaning ---")
-    print(df.head())
-except FileNotFoundError:
-    print(f"Error: '{FILE_NAME}' not found. Please ensure the file is in the same directory as the script or provide the full path.", file=sys.stderr)
-    sys.exit(1)
-except UnicodeDecodeError as e:
-    print(f"Error: Could not decode the file with 'latin1' encoding. Please check the file encoding or try another one. Details: {e}", file=sys.stderr)
-    print("Common encodings to try: 'utf-8', 'cp1252'", file=sys.stderr)
-    sys.exit(1)
-except Exception as e:
-    print(f"An error occurred while loading the CSV file: {e}", file=sys.stderr)
-    sys.exit(1)
-
-# Handle BOM character in 'docket_no' if present (from previous debugging)
-if 'ï»¿docket_no' in df.columns:
-    df.rename(columns={'ï»¿docket_no': 'docket_no'}, inplace=True)
-    print("Renamed column 'ï»¿docket_no' to 'docket_no'.")
-
-
-# Ensure required columns exist
-required_columns = ['docket_no', 'problem_reported', 'priority_name',
-                    'disposition_name', 'sub_disposition_name', 'DecodedBody',
-                    'mail_list_id', 'mail_id', 'ticket_id', 'assigned_to_dept_name', 'assigned_to_user_name']
-
-missing_columns = [col for col in required_columns if col not in df.columns]
-
-if missing_columns:
-    print(f"Error: The following required columns were not found in '{FILE_NAME}': {missing_columns}")
-    print(f"Available columns are: {df.columns.tolist()}")
-    sys.exit(1)
-
-
-# --- Apply Cleaning ---
-print("\nApplying cleaning rules...")
-
-# Apply cleaning for Problem Reported column (User Requests 1, 5, 6, 7)
-initial_rows_count = len(df)
-df['temp_problem_reported'] = df[PROBLEM_COLUMN].apply(clean_problem_reported_entry)
-# Drop rows where clean_problem_reported_entry returned None
-df = df.dropna(subset=['temp_problem_reported']).copy()
-filtered_count = initial_rows_count - len(df)
-if filtered_count > 0:
-    print(f"Filtered out {filtered_count} rows due to 'problem_reported' cleaning. Remaining rows: {len(df)}")
-df[PROBLEM_COLUMN] = df['temp_problem_reported']
-df = df.drop(columns=['temp_problem_reported'])
-
-
-# Apply comprehensive cleaning to DecodedBody to create DecodedBody_cleaned (User Requests 2, 3, 4, 8, 9)
-initial_rows_count = len(df)
-df['DecodedBody_cleaned'] = df[MAIL_BODY_COLUMN].apply(clean_decoded_body)
-# Drop rows where DecodedBody_cleaned became empty after cleaning
-df = df.dropna(subset=['DecodedBody_cleaned']).copy()
-filtered_count = initial_rows_count - len(df)
-if filtered_count > 0:
-    print(f"Filtered out {filtered_count} rows due to 'DecodedBody_cleaned' becoming empty after cleaning. Remaining rows: {len(df)}")
-
-
-# Final check to ensure DecodedBody_cleaned is not empty after all operations
-initial_rows_count = len(df)
-df = df[df['DecodedBody_cleaned'].astype(str).str.strip() != ''].copy()
-filtered_count = initial_rows_count - len(df)
-if filtered_count > 0:
-    print(f"Filtered out {filtered_count} rows due to 'DecodedBody_cleaned' being empty after final strip. Remaining rows: {len(df)}")
-
-
-print(f"Cleaning complete. Remaining rows: {len(df)}")
-
-if not df.empty:
-    # --- Display the first few rows of the cleaned DataFrame ---
-    print(f"\n--- Head of Cleaned DataFrame ({CLEANED_OUTPUT_FILE}) ---")
-    # Define key columns for preview
-    preview_cols = [
-        'docket_no',
-        'problem_reported',
-        'priority_name',
-        'disposition_name',
-        'sub_disposition_name',
-        'DecodedBody', # Show original DecodedBody
-        'DecodedBody_cleaned' # Show cleaned DecodedBody
+    # Define the keywords to search for, ordered from longest to shortest to prevent partial matches
+    keywords = [
+        "thanks and regards",
+        "best regards",
+        "thanks",
+        "regards",
+        "thank"
     ]
 
-    # Filter to only show columns that actually exist in the cleaned DataFrame
-    existing_preview_cols = [col for col in preview_cols if col in df.columns]
+    # Create a regex pattern for all keywords, ensuring case-insensitivity and word boundaries
+    # We'll use this pattern to find and replace
+    # \b ensures word boundaries so "thankful" doesn't match "thank"
+    keyword_pattern = re.compile(r'\b(' + '|'.join(map(re.escape, keywords)) + r')\b', re.IGNORECASE)
 
-    if existing_preview_cols:
-        print(df[existing_preview_cols].head().to_markdown(index=False))
-    else:
-         print(df.head().to_markdown(index=False)) # Fallback if none of the key columns exist
-    print("\n(Note: Full content for all columns, including DecodedBody, is in the CSV file. Enable 'Wrap Text' in spreadsheet for full view.)")
+    # Apply the transformation and signature removal
+    processed_texts = []
+    for text in df[column_name].astype(str): # Ensure text is treated as string
+        modified_text = text
 
+        # Step 1, 2, 3: Add full stop, break lines around keywords
+        # We will use a custom replacement function to handle the logic for each match
+        def replace_keyword(match):
+            # match.group(0) is the entire matched string (the keyword)
+            # We want to replace "KEYWORD" with ".\n{KEYWORD}\n"
+            return f".\n{match.group(0)}\n"
 
-    # --- Save the cleaned DataFrame to a new CSV file ---
-    print(f"\nSaving cleaned DataFrame to '{CLEANED_OUTPUT_FILE}'...")
+        # Apply the regex substitution. This will find all occurrences and apply the replacement.
+        modified_text = keyword_pattern.sub(replace_keyword, modified_text)
+
+        # Step 4: Apply email signature removal
+        try:
+            # Apply signature removal *after* keyword formatting
+            cleaned_text = email_signature_remover.remove_sign(modified_text)
+            processed_texts.append(cleaned_text)
+            # print(f"Cleaned text snippet:\n'{cleaned_text[:50]}...'\n") # For debugging/demonstration
+        except Exception as e:
+            print(f"Error removing signature for text: '{modified_text[:100]}...' - {e}")
+            processed_texts.append(modified_text) # Append original if error occurs
+
+    # Add the processed column to the DataFrame (or create a new one)
+    df['ProcessedBody_cleaned'] = processed_texts
+
+    # Save the updated DataFrame to a new CSV file
     try:
-        df.to_csv(CLEANED_OUTPUT_FILE, index=False)
-        print(f"Results saved to '{CLEANED_OUTPUT_FILE}'.")
+        df.to_csv(output_csv_path, index=False)
+        print(f"\nProcessing complete. Processed data saved to '{output_csv_path}'.")
+        print(f"Output file contains {len(df)} rows and {len(df.columns)} columns.")
     except Exception as e:
-        print(f"Error saving cleaned DataFrame to CSV: {e}", file=sys.stderr)
-else:
-    print("DataFrame was empty after cleaning. No output file generated.")
+        print(f"Error saving processed CSV file: {e}")
+
+# Define input and output CSV file paths
+# IMPORTANT: This has been corrected to the file name you provided.
+input_csv_file = 'ticket_details_5000.csv'
+output_csv_file = 'processed_emails.csv'
+
+# Run the processing function
+process_text_column(input_csv_file, output_csv_file)
+
+# You can optionally print the first few rows of the processed file to verify
+print("\n--- First 5 rows of the processed CSV ---")
+try:
+    processed_df = pd.read_csv(output_csv_file)
+    print(processed_df.head())
+except Exception as e:
+    print(f"Could not read processed CSV for display: {e}")
+
+
